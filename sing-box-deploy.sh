@@ -38,7 +38,7 @@ check_os() {
 
     info "Detected operating system: $OS $VERSION"
 
-    if [[ $OS == "Ubuntu" || $OS == "Debian" || $OS == "CentOS" || $OS == "Fedora" ]]; then
+    if [[ $OS == *"Ubuntu"* || $OS == *"Debian"* || $OS == *"CentOS"* || $OS == *"Fedora"* ]]; then
         return 0
     else
         error "Unsupported operating system. This script only supports Ubuntu, Debian, CentOS, and Fedora"
