@@ -13,11 +13,13 @@ Ubuntu, Debian, CentOS, Fedora
 
 ## Installation
 ```bash
-curl https://raw.githubusercontent.com/coolgeek-ai/sing-box-proxy/main/sing-box-deploy.sh | sudo bash
+wget https://raw.githubusercontent.com/coolgeek-ai/sing-box-proxy/main/sing-box-deploy.sh -O sing-box-deploy.sh
+chmod +x sing-box-deploy.sh
+sudo ./sing-box-deploy.sh
 ```
 
 ## Usage
-1. Run the CML above
+1. Run the script using the command above
 2. Follow prompts to configure (press Enter to use defaults)
 3. Use generated QR codes/links in your proxy client
 
