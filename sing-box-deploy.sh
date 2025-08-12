@@ -429,7 +429,7 @@ main() {
     echo "Reality short ID: $REALITY_SHORT_ID"
     echo "Hysteria2 server name: $HYSTERIA_SERVER_NAME"
     
-    read -p "Confirm the above configuration and continue deployment? (y/n): " CONFIRM
+    read -p "Confirm the above configuration and continue deployment? (Y/n): " CONFIRM
     if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ] && [ -n "$CONFIRM" ]; then
         error "Deployment cancelled by user"
     fi
