@@ -13,7 +13,7 @@ Ubuntu, Debian, CentOS, Fedora
 
 ## Installation
 ```bash
-wget https://raw.githubusercontent.com/coolgeek-ai/sing-box-proxy/main/sing-box-deploy.sh -O sing-box-deploy.sh
+wget https://raw.githubusercontent.com/coolgeek-ai/sing-box-proxy/main/sing-box-deploy.sh
 chmod +x sing-box-deploy.sh
 sudo ./sing-box-deploy.sh
 ```
