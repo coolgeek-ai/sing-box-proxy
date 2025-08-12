@@ -90,7 +90,7 @@ install_singbox() {
     esac
     
     # Download and install
-    SINGBOX_TAR="sing-box-${SINGBOX_VERSION}-linux-${SINGBOX_ARCH}.tar.gz"
+    SINGBOX_TAR="sing-box-${SINGBOX_VERSION#v}-linux-${SINGBOX_ARCH}.tar.gz"
     wget "https://github.com/SagerNet/sing-box/releases/download/${SINGBOX_VERSION}/${SINGBOX_TAR}" -O /tmp/${SINGBOX_TAR}
     tar -zxf /tmp/${SINGBOX_TAR} -C /tmp
     cp /tmp/sing-box-${SINGBOX_VERSION}-linux-${SINGBOX_ARCH}/sing-box /usr/local/bin/
