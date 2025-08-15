@@ -5,7 +5,7 @@
 1. 以 root 用户登录 Debian/Ubuntu 系统
 2. 执行一键部署命令：
    ```bash
-   wget -O sing-box.sh https://raw.githubusercontent.com/username/repo/main/sing-box-deploy.sh && chmod +x sing-box.sh && ./sing-box.sh
+   wget -O sing-box.sh https://raw.githubusercontent.com/coolgeek-ai/sing-box-proxy/main/sing-box-deploy.sh && chmod +x sing-box.sh && ./sing-box.sh
    ```
 3. 保存输出的配置信息和二维码，用于客户端连接
 
