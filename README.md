@@ -9,7 +9,7 @@ A one-click script to deploy a high-performance proxy server with VLESS+Reality 
 - Automatic firewall setup with UFW
 
 ## Supported OS
-Ubuntu, Debian, CentOS, Fedora
+Ubuntu, Debian
 
 ## Installation
 ```bash
@@ -17,11 +17,6 @@ wget https://raw.githubusercontent.com/coolgeek-ai/sing-box-proxy/main/sing-box-
 chmod +x sing-box-deploy.sh
 sudo ./sing-box-deploy.sh
 ```
-
-## Usage
-1. Run the script using the command above
-2. Follow prompts to configure (press Enter to use defaults)
-3. Use generated QR codes/links in your proxy client
 
 ## Management
 - Start: `systemctl start sing-box`
