@@ -26,37 +26,11 @@ check_root() {
     fi
 }
 
-# Check operating system
-check_os() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        OS=$NAME
-        VERSION=$VERSION_ID
-    else
-        error "Unable to identify operating system"
-    fi
-
-    info "Detected operating system: $OS $VERSION"
-
-    if [[ $OS == *"Ubuntu"* || $OS == *"Debian"* || $OS == *"CentOS"* || $OS == *"Fedora"* ]]; then
-        return 0
-    else
-        error "Unsupported operating system. This script only supports Ubuntu, Debian, CentOS, and Fedora"
-    fi
-}
-
 # Install necessary dependencies
 install_dependencies() {
     info "Starting installation of necessary dependencies..."
     
-    if [[ $OS == "Ubuntu" || $OS == "Debian" ]]; then
-        apt update -y
-        apt install -y curl wget unzip ufw qrencode
-    elif [[ $OS == "CentOS" ]]; then
-        yum install -y curl wget unzip ufw qrencode
-    elif [[ $OS == "Fedora" ]]; then
-        dnf install -y curl wget unzip ufw qrencode
-    fi
+        apt update -y && apt install -y curl wget unzip ufw qrencode
     
     success "Dependencies installation completed"
 }
