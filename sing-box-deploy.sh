@@ -1,146 +1,142 @@
 #!/bin/bash
-set -euo pipefail
+# 基于sing-box的vless+reality和hysteria2协议部署脚本
+# 支持扫码添加配置，适用于Debian 10+/Ubuntu 18.04+
 
-# Color output functions
-info() {
-    echo -e "\033[1;34m[INFO] $*\033[0m"
-}
-
-success() {
-    echo -e "\033[1;32m[SUCCESS] $*\033[0m"
-}
-
-warning() {
-    echo -e "\033[1;33m[WARNING] $*\033[0m"
-}
-
-error() {
-    echo -e "\033[1;31m[ERROR] $*\033[0m"
+# 检查是否以root用户运行
+if [ "$(id -u)" -ne 0 ]; then
+    echo "请使用root用户运行此脚本" >&2
     exit 1
-}
+fi
 
-# Check if running as root
-check_root() {
-    if [ "$(id -u)" -ne 0 ]; then
-        error "Please run this script as root user"
+# 检查操作系统
+check_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$NAME
+        VER=$VERSION_ID
+    else
+        echo "无法识别操作系统" >&2
+        exit 1
+    fi
+
+    if [[ $OS != "Debian GNU/Linux" && $OS != "Ubuntu" ]]; then
+        echo "此脚本仅支持Debian和Ubuntu系统" >&2
+        exit 1
     fi
 }
 
-# Install necessary dependencies
+# 安装必要依赖
 install_dependencies() {
-    info "Starting installation of necessary dependencies..."
-    
-        apt update -y && apt install -y curl wget unzip ufw qrencode
-    
-    success "Dependencies installation completed"
+    echo "正在安装必要依赖..."
+    apt update -y
+    # 新增qrencode用于生成二维码
+    apt install -y curl wget unzip jq uuid-runtime qrencode
 }
 
-# Install sing-box
+# 安装sing-box
 install_singbox() {
-    info "Starting sing-box installation..."
+    echo "正在安装sing-box..."
     
-    # Check if sing-box is already installed
-    if command -v sing-box &> /dev/null; then
-        warning "sing-box is already installed, will update it"
-        systemctl stop sing-box || true
-    fi
+    # 获取最新版本号
+    VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name' | sed 's/v//')
     
-    # Get the latest version
-    SINGBOX_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
-    info "Will install sing-box version: $SINGBOX_VERSION"
-    
-    # Detect system architecture
+    # 确定系统架构
     ARCH=$(uname -m)
     case $ARCH in
         x86_64)
-            SINGBOX_ARCH="amd64"
+            ARCH="amd64"
             ;;
         aarch64)
-            SINGBOX_ARCH="arm64"
+            ARCH="arm64"
             ;;
         *)
-            error "Unsupported system architecture: $ARCH"
+            echo "不支持的架构: $ARCH" >&2
+            exit 1
             ;;
     esac
     
-    # Download and install
-    SINGBOX_TAR="sing-box-${SINGBOX_VERSION#v}-linux-${SINGBOX_ARCH}.tar.gz"
-    wget "https://github.com/SagerNet/sing-box/releases/download/${SINGBOX_VERSION}/${SINGBOX_TAR}" -O /tmp/${SINGBOX_TAR}
-    tar -zxf /tmp/${SINGBOX_TAR} -C /tmp
-    cp /tmp/sing-box-${SINGBOX_VERSION#v}-linux-${SINGBOX_ARCH}/sing-box /usr/local/bin/
+    # 下载并安装
+    wget "https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-${ARCH}.tar.gz" -O /tmp/sing-box.tar.gz
+    mkdir -p /tmp/sing-box
+    tar -zxf /tmp/sing-box.tar.gz -C /tmp/sing-box --strip-components=1
+    mv /tmp/sing-box/sing-box /usr/local/bin/
     chmod +x /usr/local/bin/sing-box
     
-    # Create configuration directory
+    # 创建配置目录
     mkdir -p /etc/sing-box
     mkdir -p /var/log/sing-box
-    
-    # Clean up temporary files
-    rm -rf /tmp/${SINGBOX_TAR} /tmp/sing-box-${SINGBOX_VERSION}-linux-${SINGBOX_ARCH}
-    
-    success "sing-box installation completed"
 }
 
-# Configure firewall
-configure_firewall() {
-    info "Starting firewall configuration..."
+# 生成Reality配置所需的证书和密钥
+generate_reality_assets() {
+    echo "正在生成Reality所需的证书和密钥..."
     
-    # Enable ufw
-    ufw enable
+    # 生成私钥
+    PRIVATE_KEY=$(sing-box generate reality private-key)
+    echo "$PRIVATE_KEY" > /etc/sing-box/private.key
     
-    # Allow SSH connections
-    ufw allow ssh
-    ufw allow 22/tcp
+    # 生成公钥
+    PUBLIC_KEY=$(echo "$PRIVATE_KEY" | sing-box generate reality public-key)
     
-    # Allow custom ports
-    ufw allow $VLESS_PORT/tcp
-    ufw allow $HYSTERIA_PORT/udp
+    # 生成短ID
+    SHORT_ID=$(openssl rand -hex 8)
     
-    # Allow HTTP/HTTPS (for camouflage)
-    ufw allow 80/tcp
-    ufw allow 443/tcp
-    
-    success "Firewall configuration completed"
+    # 保存相关信息
+    echo "$PUBLIC_KEY" > /etc/sing-box/public.key
+    echo "$SHORT_ID" > /etc/sing-box/short_id
 }
 
-# Generate certificates and keys
-generate_certificates() {
-    info "Starting certificate and key generation..."
+# 生成Hysteria2配置所需的证书
+generate_hysteria_cert() {
+    echo "正在生成Hysteria2所需的证书..."
     
-    # Generate Reality certificate
-    sing-box generate reality-keypair > /etc/sing-box/reality_keys.txt
+    # 生成自签名证书
+    openssl req -x509 -newkey rsa:4096 -nodes -keyout /etc/sing-box/hysteria.key -out /etc/sing-box/hysteria.crt -days 3650 -subj "/CN=example.com"
     
-    # Extract private and public keys
-    PRIVATE_KEY=$(grep "PrivateKey" /etc/sing-box/reality_keys.txt | awk '{print $2}')
-    PUBLIC_KEY=$(grep "PublicKey" /etc/sing-box/reality_keys.txt | awk '{print $2}')
-    
-    success "Certificate and key generation completed"
-}
-
-# Generate sing-box configuration
-generate_config() {
-    info "Starting sing-box configuration file generation..."
-    
-    # Generate UUID
-    UUID=$(sing-box generate uuid)
-    
-    # Generate Hysteria2 password
+    # 生成密码
     HYSTERIA_PASSWORD=$(openssl rand -hex 16)
+    echo "$HYSTERIA_PASSWORD" > /etc/sing-box/hysteria_password
+}
+
+# 创建sing-box配置文件
+create_config() {
+    echo "正在创建配置文件..."
     
-    # Create configuration file
+    # 获取服务器IP
+    SERVER_IP=$(curl -s icanhazip.com)
+    
+    # 随机端口 (1024-65535)
+    VLESS_PORT=$((RANDOM % 64512 + 1024))
+    HYSTERIA_PORT=$((RANDOM % 64512 + 1024))
+    
+    # 确保端口不同
+    while [ $HYSTERIA_PORT -eq $VLESS_PORT ]; do
+        HYSTERIA_PORT=$((RANDOM % 64512 + 1024))
+    done
+    
+    # 获取之前生成的密钥和ID
+    PRIVATE_KEY=$(cat /etc/sing-box/private.key)
+    PUBLIC_KEY=$(cat /etc/sing-box/public.key)
+    SHORT_ID=$(cat /etc/sing-box/short_id)
+    HYSTERIA_PASSWORD=$(cat /etc/sing-box/hysteria_password)
+    
+    # 生成UUID
+    UUID=$(uuidgen)
+    
+    # 创建配置文件
     cat > /etc/sing-box/config.json << EOF
 {
     "log": {
         "level": "info",
-        "timestamp": true,
-        "output": "/var/log/sing-box/sing-box.log"
+        "output": "/var/log/sing-box/sing-box.log",
+        "timestamp": true
     },
     "inbounds": [
         {
             "type": "vless",
             "tag": "vless-in",
-            "listen": "::",
+            "listen": "0.0.0.0",
             "listen_port": $VLESS_PORT,
-            "tcp_fast_open": true,
             "sniff": true,
             "sniff_override_destination": true,
             "domain_strategy": "prefer_ipv4",
@@ -152,70 +148,39 @@ generate_config() {
             ],
             "tls": {
                 "enabled": true,
-                "server_name": "$REALITY_SERVER_NAME",
+                "server_name": "www.amazon.com",
                 "reality": {
                     "enabled": true,
                     "handshake": {
-                        "server": "$REALITY_HANDSHAKE",
+                        "server": "www.amazon.com",
                         "server_port": 443
                     },
                     "private_key": "$PRIVATE_KEY",
-                    "short_id": ["$REALITY_SHORT_ID"]
-                },
-                "utls": {
-                    "enabled": true,
-                    "fingerprint": "chrome"
-                }
-            },
-            "transport": {
-                "type": "tcp",
-                "tcp": {
-                    "accept_proxy_protocol": false,
-                    "header": {
-                        "type": "none"
-                    }
+                    "short_id": [
+                        "$SHORT_ID"
+                    ]
                 }
             }
         },
         {
             "type": "hysteria2",
             "tag": "hysteria2-in",
-            "listen": "::",
+            "listen": "0.0.0.0",
             "listen_port": $HYSTERIA_PORT,
             "sniff": true,
             "sniff_override_destination": true,
-            "domain_strategy": "prefer_ipv4",
-            "users": [
-                {
-                    "password": "$HYSTERIA_PASSWORD"
-                }
-            ],
+            "auth": {
+                "type": "password",
+                "password": "$HYSTERIA_PASSWORD"
+            },
             "tls": {
                 "enabled": true,
-                "server_name": "$HYSTERIA_SERVER_NAME",
-                "alpn": ["h3", "http/1.1"],
-                "certificate_path": "/etc/sing-box/cert.pem",
-                "key_path": "/etc/sing-box/key.pem",
-                "utls": {
-                    "enabled": true,
-                    "fingerprint": "chrome"
-                }
+                "certificate_path": "/etc/sing-box/hysteria.crt",
+                "key_path": "/etc/sing-box/hysteria.key"
             },
-            "quic": {
-                "initital_mtu": 1200,
-                "max_idle_timeout": "30s",
-                "keep_alive_interval": "10s",
-                "disable_path_mtu_discovery": false
-            },
-            "bandwidth": {
-                "up": "100mbps",
-                "down": "1000mbps"
-            },
-            "obfs": {
-                "type": "salamander",
-                "salamander": {
-                    "password": "$HYSTERIA_OBFS_PASSWORD"
-                }
+            "masquerade": {
+                "type": "socks",
+                "server": "127.0.0.1:1080"
             }
         }
     ],
@@ -231,62 +196,34 @@ generate_config() {
     ],
     "route": {
         "rules": [
-            // Video streams use hysteria2
             {
-                "protocol": ["http", "https"],
-                "domain_suffix": [
-                    "youtube.com", "youtu.be", "netflix.com", 
-                    "hbo.com", "disneyplus.com", "primevideo.com",
-                    "twitch.tv", "vimeo.com", "dailymotion.com"
-                ],
-                "outbound": "hysteria2-in"
-            },
-            // High-bandwidth applications use hysteria2
-            {
-                "process_name": ["qbittorrent", "transmission", "aria2c"],
-                "outbound": "hysteria2-in"
-            },
-            // Other traffic uses vless+reality
-            {
-                "match": ["all"],
-                "outbound": "vless-in"
+                "protocol": ["dns"],
+                "outbound": "direct"
             }
         ],
-        "geoip": {
-            "path": "/etc/sing-box/geoip.db",
-            "download_url": "https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db"
-        },
-        "geosite": {
-            "path": "/etc/sing-box/geosite.db",
-            "download_url": "https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db"
-        }
-    },
-    "experimental": {
-        "cache_file": {
-            "enabled": true,
-            "path": "/var/lib/sing-box/cache.db"
-        }
+        "final": "direct",
+        "auto_detect_interface": true
     }
 }
 EOF
 
-    # Download geoip and geosite databases
-    wget "https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db" -O /etc/sing-box/geoip.db
-    wget "https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db" -O /etc/sing-box/geosite.db
+    # 保存端口信息
+    echo $VLESS_PORT > /etc/sing-box/vless_port
+    echo $HYSTERIA_PORT > /etc/sing-box/hysteria_port
+    echo $UUID > /etc/sing-box/uuid
+    echo $SERVER_IP > /etc/sing-box/server_ip
     
-    # Generate self-signed certificate (for hysteria2)
-    openssl req -x509 -newkey rsa:4096 -nodes -keyout /etc/sing-box/key.pem -out /etc/sing-box/cert.pem -days 3650 -subj "/CN=$HYSTERIA_SERVER_NAME"
+    # 生成连接字符串并保存
+    VLESS_LINK="vless://$UUID@$SERVER_IP:$VLESS_PORT?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.amazon.com&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID&type=tcp&headerType=none#VLESS-Reality"
+    echo "$VLESS_LINK" > /etc/sing-box/vless_link
     
-    success "sing-box configuration file generation completed"
-    
-    # Save connection information
-    VLESS_LINK="vless://$UUID@$SERVER_IP:$VLESS_PORT?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$REALITY_SERVER_NAME&fp=chrome&pbk=$PUBLIC_KEY&sid=$REALITY_SHORT_ID&type=tcp&headerType=none#vless-reality"
-    HYSTERIA_LINK="hysteria2://$HYSTERIA_PASSWORD@$SERVER_IP:$HYSTERIA_PORT?insecure=1&sni=$HYSTERIA_SERVER_NAME&alpn=h3,http/1.1&obfs=salamander&obfs-password=$HYSTERIA_OBFS_PASSWORD#hysteria2"
+    HYSTERIA_LINK="hysteria2://$HYSTERIA_PASSWORD@$SERVER_IP:$HYSTERIA_PORT?insecure=1&sni=example.com#Hysteria2"
+    echo "$HYSTERIA_LINK" > /etc/sing-box/hysteria_link
 }
 
-# Create systemd service
+# 创建系统服务
 create_service() {
-    info "Creating systemd service..."
+    echo "正在创建系统服务..."
     
     cat > /etc/systemd/system/sing-box.service << EOF
 [Unit]
@@ -300,123 +237,106 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
 Restart=on-failure
-RestartSec=10s
+RestartSec=10
 LimitNOFILE=infinity
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    # Start service and enable on boot
+    # 启用并启动服务
     systemctl daemon-reload
-    systemctl start sing-box
     systemctl enable sing-box
-    
-    success "sing-box service has been started and set to start on boot"
+    systemctl start sing-box
 }
 
-# Display configuration information
-show_config_info() {
-    info "Deployment completed. Here is your proxy configuration information:"
-    echo "----------------------------------------"
-    echo "Server IP: $SERVER_IP"
-    echo "----------------------------------------"
-    echo "VLESS+Reality Configuration:"
-    echo "Port: $VLESS_PORT"
-    echo "UUID: $UUID"
-    echo "Server Name: $REALITY_SERVER_NAME"
-    echo "Public Key: $PUBLIC_KEY"
-    echo "Short ID: $REALITY_SHORT_ID"
-    echo "Handshake Domain: $REALITY_HANDSHAKE"
-    echo "Link: $VLESS_LINK"
-    echo "----------------------------------------"
-    echo "Hysteria2 Configuration:"
-    echo "Port: $HYSTERIA_PORT"
-    echo "Password: $HYSTERIA_PASSWORD"
-    echo "Server Name: $HYSTERIA_SERVER_NAME"
-    echo "Obfuscation Password: $HYSTERIA_OBFS_PASSWORD"
-    echo "Link: $HYSTERIA_LINK"
-    echo "----------------------------------------"
+# 配置防火墙
+configure_firewall() {
+    echo "正在配置防火墙..."
     
-    # Generate QR codes
-    info "VLESS+Reality QR Code:"
-    qrencode -t ANSIUTF8 "$VLESS_LINK"
-    echo "----------------------------------------"
-    info "Hysteria2 QR Code:"
-    qrencode -t ANSIUTF8 "$HYSTERIA_LINK"
-    echo "----------------------------------------"
+    # 获取端口
+    VLESS_PORT=$(cat /etc/sing-box/vless_port)
+    HYSTERIA_PORT=$(cat /etc/sing-box/hysteria_port)
     
-    success "All configurations are complete. You can use the above information to connect to the proxy server"
-}
-
-# Main function
-main() {
-    clear
-    echo "========================================"
-    echo "      sing-box Dual Protocol Proxy       "
-    echo "    Supports VLESS+Reality & Hysteria2   "
-    echo "        One-Click Deployment Script      "
-    echo "========================================"
-    echo
-    
-    # Check environment
-    check_root
-    check_os
-    
-    # Get server IP
-    SERVER_IP=$(curl -s http://icanhazip.com || curl -s http://ipinfo.io/ip)
-    info "Detected server public IP: $SERVER_IP"
-    
-    # Interactive configuration
-    info "Please configure some basic settings (press Enter to use default values)"
-    
-    read -p "Enter VLESS+Reality port (default: 443): " VLESS_PORT
-    VLESS_PORT=${VLESS_PORT:-443}
-    
-    read -p "Enter Hysteria2 port (default: 4430): " HYSTERIA_PORT
-    HYSTERIA_PORT=${HYSTERIA_PORT:-4430}
-    
-    read -p "Enter Reality server name (default: www.cloudflare.com): " REALITY_SERVER_NAME
-    REALITY_SERVER_NAME=${REALITY_SERVER_NAME:-www.cloudflare.com}
-    
-    # Updated default Reality handshake domain to www.bing.com
-    read -p "Enter Reality handshake domain (default: www.bing.com): " REALITY_HANDSHAKE
-    REALITY_HANDSHAKE=${REALITY_HANDSHAKE:-www.bing.com}
-    
-    read -p "Enter Reality short ID (default: randomly generated): " REALITY_SHORT_ID
-    REALITY_SHORT_ID=${REALITY_SHORT_ID:-$(openssl rand -hex 8)}
-    
-    # Updated default Hysteria2 server name to www.microsoft.com
-    read -p "Enter Hysteria2 server name (default: www.microsoft.com): " HYSTERIA_SERVER_NAME
-    HYSTERIA_SERVER_NAME=${HYSTERIA_SERVER_NAME:-www.microsoft.com}
-    
-    # Generate Hysteria2 obfuscation password
-    HYSTERIA_OBFS_PASSWORD=$(openssl rand -hex 16)
-    
-    # Confirm configuration
-    echo
-    info "Configuration confirmation:"
-    echo "VLESS+Reality port: $VLESS_PORT"
-    echo "Hysteria2 port: $HYSTERIA_PORT"
-    echo "Reality server name: $REALITY_SERVER_NAME"
-    echo "Reality handshake domain: $REALITY_HANDSHAKE"
-    echo "Reality short ID: $REALITY_SHORT_ID"
-    echo "Hysteria2 server name: $HYSTERIA_SERVER_NAME"
-    
-    read -p "Confirm the above configuration and continue deployment? (Y/n): " CONFIRM
-    if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ] && [ -n "$CONFIRM" ]; then
-        error "Deployment cancelled by user"
+    # 检查是否安装了ufw
+    if ! command -v ufw &> /dev/null; then
+        apt install -y ufw
     fi
     
-    # Start deployment
-    install_dependencies
-    install_singbox
-    generate_certificates
-    generate_config
-    configure_firewall
-    create_service
-    show_config_info
+    # 允许端口通过防火墙
+    ufw allow $VLESS_PORT/tcp
+    ufw allow $HYSTERIA_PORT/udp
+    
+    # 启用防火墙（如果未启用）
+    if [ "$(ufw status | grep -c "inactive")" -gt 0 ]; then
+        ufw --force enable
+    fi
 }
 
-# Start main function
+# 显示配置信息和二维码
+show_info() {
+    echo "=============================================="
+    echo "部署完成！以下是您的代理配置信息："
+    echo "=============================================="
+    
+    SERVER_IP=$(cat /etc/sing-box/server_ip)
+    VLESS_PORT=$(cat /etc/sing-box/vless_port)
+    HYSTERIA_PORT=$(cat /etc/sing-box/hysteria_port)
+    UUID=$(cat /etc/sing-box/uuid)
+    PUBLIC_KEY=$(cat /etc/sing-box/public.key)
+    SHORT_ID=$(cat /etc/sing-box/short_id)
+    HYSTERIA_PASSWORD=$(cat /etc/sing-box/hysteria_password)
+    VLESS_LINK=$(cat /etc/sing-box/vless_link)
+    HYSTERIA_LINK=$(cat /etc/sing-box/hysteria_link)
+    
+    echo "服务器 IP: $SERVER_IP"
+    echo "----------------------------------------------"
+    echo "VLESS + Reality 配置："
+    echo "协议：vless"
+    echo "地址：$SERVER_IP"
+    echo "端口：$VLESS_PORT"
+    echo "UUID：$UUID"
+    echo "流控：xtls-rprx-vision"
+    echo "Reality 公钥：$PUBLIC_KEY"
+    echo "Reality 短 ID：$SHORT_ID"
+    echo "服务器名称：www.amazon.com"
+    echo "传输协议：tcp"
+    echo "连接链接：$VLESS_LINK"
+    echo "扫码添加："
+    qrencode -t ANSIUTF8 "$VLESS_LINK"
+    echo "----------------------------------------------"
+    echo "Hysteria2 配置："
+    echo "协议：hysteria2"
+    echo "地址：$SERVER_IP"
+    echo "端口：$HYSTERIA_PORT"
+    echo "密码：$HYSTERIA_PASSWORD"
+    echo "传输协议：udp"
+    echo "连接链接：$HYSTERIA_LINK"
+    echo "扫码添加："
+    qrencode -t ANSIUTF8 "$HYSTERIA_LINK"
+    echo "----------------------------------------------"
+    echo "服务管理命令："
+    echo "启动：systemctl start sing-box"
+    echo "停止：systemctl stop sing-box"
+    echo "重启：systemctl restart sing-box"
+    echo "状态：systemctl status sing-box"
+    echo "查看链接：cat /etc/sing-box/vless_link 和 cat /etc/sing-box/hysteria_link"
+    echo "查看二维码：qrencode -t ANSIUTF8 \$(cat /etc/sing-box/vless_link)"
+    echo "=============================================="
+}
+
+# 主函数
+main() {
+    check_os
+    install_dependencies
+    install_singbox
+    generate_reality_assets
+    generate_hysteria_cert
+    create_config
+    create_service
+    configure_firewall
+    show_info
+}
+
+# 运行主函数
 main
