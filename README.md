@@ -16,17 +16,11 @@
 - 需 root 权限运行
 
 ## 安装步骤
-1. 下载脚本：
+1. 下载并运行脚本：
    ```bash
-   wget https://raw.githubusercontent.com/yourusername/yourrepo/main/sing-box-deploy.sh -O sing-box-deploy.sh
+   wget https://raw.githubusercontent.com/yourusername/yourrepo/main/sing-box-deploy.sh -O sing-box-deploy.sh && chmod +x sing-box-deploy.sh && ./sing-box-deploy.sh
    ```
-
-2. 赋予权限并运行：
-   ```bash
-   chmod +x sing-box-deploy.sh && ./sing-box-deploy.sh
-   ```
-
-3. 记录输出的配置信息和二维码
+2. 记录输出的配置信息和二维码
 
 ## 服务管理# 启动/停止/重启
 systemctl start/stop/restart sing-box
