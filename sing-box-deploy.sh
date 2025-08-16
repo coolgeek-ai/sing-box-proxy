@@ -1,425 +1,440 @@
 #!/bin/bash
 set -euo pipefail
 
-# 检查是否以root用户运行
-if [ "$(id -u)" -ne 0 ]; then
-    echo "请使用root用户运行此脚本" >&2
-    exit 1
-fi
+# 检查系统和架构
+check_system() {
+    if [ "$(uname -m)" != "x86_64" ]; then
+        echo "错误：仅支持amd64架构"
+        exit 1
+    fi
 
-# 检查操作系统
-if ! grep -q -E 'debian|ubuntu' /etc/os-release; then
-    echo "此脚本仅支持Debian/Ubuntu系统" >&2
-    exit 1
-fi
+    if ! grep -Eqi "debian|ubuntu" /etc/os-release; then
+        echo "错误：仅支持Debian或Ubuntu系统"
+        exit 1
+    fi
+}
 
 # 安装必要依赖
-echo "正在安装必要依赖..."
-apt update -qq
-apt install -y -qq curl wget unzip jq ufw qrencode
+install_dependencies() {
+    echo "安装必要依赖..."
+    apt update -qq
+    apt install -y -qq curl wget unzip qrencode jq > /dev/null
+}
 
-# 获取sing-box最新版本
-echo "正在获取sing-box最新版本..."
-SING_BOX_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name' | sed 's/v//')
-if [ -z "$SING_BOX_VERSION" ] || [ "$SING_BOX_VERSION" = "null" ]; then
-    echo "获取最新版本失败，使用默认版本1.8.0"
-    SING_BOX_VERSION="1.8.0"
-fi
+# 下载最新版sing-box
+install_singbox() {
+    echo "下载最新版sing-box..."
+    # 获取最新版本号
+    VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+    
+    # 下载并解压
+    wget -q "https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-amd64.zip" -O /tmp/sing-box.zip
+    unzip -q -o /tmp/sing-box.zip -d /tmp
+    mv "/tmp/sing-box-${VERSION}-linux-amd64/sing-box" /usr/local/bin/
+    chmod +x /usr/local/bin/sing-box
+    rm -rf /tmp/sing-box*
+    
+    # 创建必要目录
+    mkdir -p /etc/sing-box /var/log/sing-box
+}
 
-# 确定架构
-ARCH=$(uname -m)
-case $ARCH in
-    x86_64) ARCH="amd64" ;;
-    aarch64) ARCH="arm64" ;;
-    *) echo "不支持的架构: $ARCH" >&2; exit 1 ;;
-esac
-
-# 安装sing-box
-echo "正在安装sing-box $SING_BOX_VERSION..."
-wget -q https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-linux-${ARCH}.tar.gz -O /tmp/sing-box.tar.gz
-mkdir -p /tmp/sing-box
-tar -zxf /tmp/sing-box.tar.gz -C /tmp/sing-box --strip-components=1
-mv /tmp/sing-box/sing-box /usr/local/bin/
-chmod +x /usr/local/bin/sing-box
-rm -rf /tmp/sing-box /tmp/sing-box.tar.gz
-
-# 创建配置目录
-mkdir -p /etc/sing-box /var/log/sing-box
-chmod 700 /etc/sing-box
-
-# 生成UUID和密钥
-UUID=$(sing-box generate uuid)
-REALITY_KEYPAIR=$(sing-box generate reality-keypair)
-REALITY_PRIVATE_KEY=$(echo "$REALITY_KEYPAIR" | grep Private | awk '{print $3}')
-REALITY_PUBLIC_KEY=$(echo "$REALITY_KEYPAIR" | grep Public | awk '{print $3}')
-HYSTERIA2_PASSWORD=$(openssl rand -base64 16)
-
-# 获取服务器IP
-SERVER_IP=$(curl -s http://icanhazip.com || curl -s http://ifconfig.me)
-
-# 选择未被屏蔽的服务器名称
-SERVER_NAMES=("www.cloudflare.com" "www.bing.com" "www.microsoft.com")
-RANDOM_INDEX=$((RANDOM % ${#SERVER_NAMES[@]}))
-PRIMARY_SERVER_NAME=${SERVER_NAMES[$RANDOM_INDEX]}
-# 选择不同的服务器名称用于不同协议
-if [ $RANDOM_INDEX -eq 0 ]; then
-    SECONDARY_SERVER_NAME=${SERVER_NAMES[1]}
-elif [ $RANDOM_INDEX -eq 1 ]; then
-    SECONDARY_SERVER_NAME=${SERVER_NAMES[2]}
-else
-    SECONDARY_SERVER_NAME=${SERVER_NAMES[0]}
-fi
-
-# 生成sing-box配置 - 包含智能路由和协议切换
-cat > /etc/sing-box/config.json << EOF
+# 生成配置
+generate_config() {
+    echo "生成配置文件..."
+    
+    # 获取服务器IP
+    SERVER_IP=$(curl -s https://api.ipify.org)
+    
+    # 随机端口（10000-65535）
+    VLESS_PORT=$((RANDOM % 55535 + 10000))
+    HYSTERIA_PORT=$((RANDOM % 55535 + 10000))
+    while [ $HYSTERIA_PORT -eq $VLESS_PORT ]; do
+        HYSTERIA_PORT=$((RANDOM % 55535 + 10000))
+    done
+    
+    # 随机选择一个未被屏蔽的server name
+    SERVER_NAMES=("www.cloudflare.com" "www.bing.com" "www.microsoft.com" "www.office.com" "www.skype.com")
+    SERVER_NAME=${SERVER_NAMES[$RANDOM % ${#SERVER_NAMES[@]}]}
+    
+    # 生成UUID
+    UUID=$(sing-box generate uuid)
+    
+    # 生成Reality密钥
+    REALITY_PRIVATE_KEY=$(sing-box generate reality-keypair | grep "Private key" | awk '{print $3}')
+    REALITY_PUBLIC_KEY=$(sing-box generate reality-keypair | grep "Public key" | awk '{print $3}')
+    
+    # 生成Hysteria2密钥
+    HYSTERIA_PASSWORD=$(openssl rand -hex 16)
+    
+    # 视频流网站列表（用于分流）
+    VIDEO_DOMAINS=(
+        "youtube.com" "youtu.be" "netflix.com" "hbo.com" "disneyplus.com"
+        "primevideo.com" "hulu.com" "paramountplus.com" "peacocktv.com"
+        "apple.com" "crunchyroll.com" "funimation.com" "twitch.tv" "vimeo.com"
+    )
+    
+    # 构建配置文件
+    cat > /etc/sing-box/config.json << EOF
 {
-  "log": {
-    "level": "error",
-    "timestamp": true
-  },
-  "inbounds": [
-    {
-      "type": "vless",
-      "tag": "vless-in",
-      "listen": "0.0.0.0",
-      "listen_port": 443,
-      "sniff": true,
-      "sniff_override_destination": true,
-      "domain_strategy": "prefer_ipv4",
-      "users": [
+    "log": {
+        "level": "info",
+        "output": "/var/log/sing-box/sing-box.log",
+        "timestamp": true
+    },
+    "inbounds": [
         {
-          "uuid": "${UUID}",
-          "flow": "xtls-rprx-vision"
+            "type": "mixed",
+            "tag": "mixed-in",
+            "listen": "::",
+            "listen_port": 1080,
+            "sniff": true,
+            "sniff_override_destination": true
         }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "${PRIMARY_SERVER_NAME}",
-        "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": "${PRIMARY_SERVER_NAME}",
-            "server_port": 443
-          },
-          "private_key": "${REALITY_PRIVATE_KEY}",
-          "short_id": [
-            ""
-          ]
-        },
-        "min_version": "1.2",
-        "cipher_suites": "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384"
-      }
-    },
-    {
-      "type": "hysteria2",
-      "tag": "hysteria2-in",
-      "listen": "0.0.0.0",
-      "listen_port": 4443,
-      "sniff": true,
-      "sniff_override_destination": true,
-      "users": [
-        {
-          "password": "${HYSTERIA2_PASSWORD}"
-        }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "${SECONDARY_SERVER_NAME}",
-        "alpn": [
-          "h3"
-        ],
-        "certificate_path": "/etc/sing-box/server.crt",
-        "key_path": "/etc/sing-box/server.key",
-        "min_version": "1.2"
-      },
-      "quic": {
-        "initially_mtu": 1200,
-        "max_idle_timeout": "30s"
-      },
-      "masquerade": {
-        "type": "proxy",
-        "proxy": {
-          "url": "https://${SECONDARY_SERVER_NAME}",
-          "rewrite_host": true
-        }
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
-    },
-    {
-      "type": "block",
-      "tag": "block"
-    },
-    {
-      "type": "selector",
-      "tag": "selector",
-      "outbounds": [
-        "vless-out",
-        "hysteria2-out"
-      ],
-      "default": "vless-out",
-      "interrupt_exist_connections": true,
-      "health_check": {
-        "enable": true,
-        "url": "https://www.gstatic.com/generate_204",
-        "interval": "30s",
-        "timeout": "10s",
-        "lazy": false
-      }
-    },
-    {
-      "type": "vless",
-      "tag": "vless-out",
-      "server": "${SERVER_IP}",
-      "server_port": 443,
-      "uuid": "${UUID}",
-      "flow": "xtls-rprx-vision",
-      "tls": {
-        "enabled": true,
-        "server_name": "${PRIMARY_SERVER_NAME}",
-        "reality": {
-          "enabled": true,
-          "public_key": "${REALITY_PUBLIC_KEY}",
-          "short_id": ""
-        },
-        "insecure": false
-      }
-    },
-    {
-      "type": "hysteria2",
-      "tag": "hysteria2-out",
-      "server": "${SERVER_IP}",
-      "server_port": 4443,
-      "password": "${HYSTERIA2_PASSWORD}",
-      "tls": {
-        "enabled": true,
-        "server_name": "${SECONDARY_SERVER_NAME}",
-        "insecure": true
-      }
-    }
-  ],
-  "route": {
-    "rules": [
-      {
-        "domain": [
-          "youtube.com",
-          "netflix.com",
-          "disneyplus.com",
-          "hbo.com",
-          "primevideo.com",
-          "vimeo.com",
-          "dailymotion.com"
-        ],
-        "outbound": "hysteria2-out",
-        "enabled": true
-      },
-      {
-        "geoip": {
-          "country": "CN"
-        },
-        "outbound": "direct",
-        "enabled": true
-      },
-      {
-        "inbound_tag": [
-          "vless-in",
-          "hysteria2-in"
-        ],
-        "outbound": "direct",
-        "enabled": true
-      }
     ],
-    "final": "selector"
-  }
+    "outbounds": [
+        {
+            "type": "vless",
+            "tag": "vless-out",
+            "server": "${SERVER_IP}",
+            "server_port": ${VLESS_PORT},
+            "uuid": "${UUID}",
+            "network": "tcp",
+            "tls": {
+                "enabled": true,
+                "server_name": "${SERVER_NAME}",
+                "reality": {
+                    "enabled": true,
+                    "private_key": "${REALITY_PRIVATE_KEY}",
+                    "short_id": ["$(openssl rand -hex 8)"]
+                },
+                "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                }
+            },
+            "packet_encoding": "xudp"
+        },
+        {
+            "type": "hysteria2",
+            "tag": "hysteria2-out",
+            "server": "${SERVER_IP}",
+            "server_port": ${HYSTERIA_PORT},
+            "password": "${HYSTERIA_PASSWORD}",
+            "tls": {
+                "enabled": true,
+                "server_name": "${SERVER_NAME}",
+                "insecure": false
+            },
+            "network": "udp",
+            "up_mbps": 100,
+            "down_mbps": 1000,
+            "obfs": {
+                "type": "salamander",
+                "password": "$(openssl rand -hex 16)"
+            }
+        },
+        {
+            "type": "direct",
+            "tag": "direct-out"
+        },
+        {
+            "type": "block",
+            "tag": "block-out"
+        }
+    ],
+    "route": {
+        "geoip": {
+            "download": true,
+            "path": "/etc/sing-box/geoip.db",
+            "cache": true
+        },
+        "geosite": {
+            "download": true,
+            "path": "/etc/sing-box/geosite.db",
+            "cache": true
+        },
+        "rules": [
+            $(printf '"domain:%s",' "${VIDEO_DOMAINS[@]}" | sed 's/,$//')
+        ].map(domain => ({
+            "domain": [domain],
+            "outbound": "hysteria2-out",
+            "type": "field"
+        })).concat([
+            {
+                "geoip": ["cn"],
+                "outbound": "direct-out",
+                "type": "field"
+            },
+            {
+                "geosite": ["cn"],
+                "outbound": "direct-out",
+                "type": "field"
+            },
+            {
+                "protocol": ["dns"],
+                "outbound": "direct-out",
+                "type": "field"
+            },
+            {
+                "outbound": "vless-out",
+                "type": "field"
+            }
+        ])
+    },
+    "experimental": {
+        "cache_file": {
+            "enabled": true,
+            "path": "/var/lib/sing-box/cache.db"
+        },
+        "auto_route": {
+            "enabled": true
+        },
+        "sniff": {
+            "enabled": true,
+            "override_destination": true
+        }
+    }
 }
 EOF
 
-# 生成自签名证书 (hysteria2使用)
-echo "正在生成TLS证书..."
-openssl req -x509 -newkey rsa:4096 -nodes -keyout /etc/sing-box/server.key -out /etc/sing-box/server.crt -days 3650 -subj "/CN=${SECONDARY_SERVER_NAME}"
-chmod 600 /etc/sing-box/server.key /etc/sing-box/server.crt
+    # 生成客户端配置
+    generate_client_configs
+}
 
-# 创建systemd服务
-cat > /etc/systemd/system/sing-box.service << EOF
+# 生成客户端配置和二维码
+generate_client_configs() {
+    echo "生成客户端配置和二维码..."
+    
+    SERVER_IP=$(curl -s https://api.ipify.org)
+    UUID=$(grep -oP '"uuid": "\K[^"]+' /etc/sing-box/config.json)
+    VLESS_PORT=$(grep -oP '"server_port": \K\d+' /etc/sing-box/config.json | head -n 1)
+    HYSTERIA_PORT=$(grep -oP '"server_port": \K\d+' /etc/sing-box/config.json | tail -n 1)
+    SERVER_NAME=$(grep -oP '"server_name": "\K[^"]+' /etc/sing-box/config.json | head -n 1)
+    REALITY_PUBLIC_KEY=$(sing-box generate reality-keypair | grep "Public key" | awk '{print $3}')
+    REALITY_SHORT_ID=$(grep -oP '"short_id": \["\K[^"]+' /etc/sing-box/config.json)
+    HYSTERIA_PASSWORD=$(grep -oP '"password": "\K[^"]+' /etc/sing-box/config.json | tail -n 1)
+    HYSTERIA_OBFS_PASSWORD=$(grep -oP '"password": "\K[^"]+' /etc/sing-box/config.json | tail -n 2 | head -n 1)
+    
+    # 生成VLESS Reality客户端配置
+    VLESS_CONFIG=$(cat << EOF
+{
+    "outbounds": [
+        {
+            "type": "vless",
+            "server": "${SERVER_IP}",
+            "server_port": ${VLESS_PORT},
+            "uuid": "${UUID}",
+            "network": "tcp",
+            "tls": {
+                "enabled": true,
+                "server_name": "${SERVER_NAME}",
+                "reality": {
+                    "enabled": true,
+                    "public_key": "${REALITY_PUBLIC_KEY}",
+                    "short_id": "${REALITY_SHORT_ID}"
+                },
+                "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                }
+            },
+            "packet_encoding": "xudp"
+        }
+    ]
+}
+EOF
+    )
+    
+    # 生成Hysteria2客户端配置
+    HYSTERIA_CONFIG=$(cat << EOF
+{
+    "outbounds": [
+        {
+            "type": "hysteria2",
+            "server": "${SERVER_IP}",
+            "server_port": ${HYSTERIA_PORT},
+            "password": "${HYSTERIA_PASSWORD}",
+            "tls": {
+                "enabled": true,
+                "server_name": "${SERVER_NAME}",
+                "insecure": false
+            },
+            "network": "udp",
+            "up_mbps": 100,
+            "down_mbps": 1000,
+            "obfs": {
+                "type": "salamander",
+                "password": "${HYSTERIA_OBFS_PASSWORD}"
+            }
+        }
+    ]
+}
+EOF
+    )
+    
+    # 生成合并配置（带自动切换）
+    COMBINED_CONFIG=$(cat << EOF
+{
+    "log": {
+        "level": "info"
+    },
+    "inbounds": [
+        {
+            "type": "mixed",
+            "tag": "mixed-in",
+            "listen": "127.0.0.1",
+            "listen_port": 1080,
+            "sniff": true
+        }
+    ],
+    "outbounds": [
+        $(echo "$VLESS_CONFIG" | jq '.outbounds[0] | . + {"tag": "vless-out"}'),
+        $(echo "$HYSTERIA_CONFIG" | jq '.outbounds[0] | . + {"tag": "hysteria2-out"}'),
+        {
+            "type": "direct",
+            "tag": "direct-out"
+        }
+    ],
+    "route": {
+        "geoip": {
+            "download": true,
+            "path": "/etc/sing-box/geoip.db",
+            "cache": true
+        },
+        "geosite": {
+            "download": true,
+            "path": "/etc/sing-box/geosite.db",
+            "cache": true
+        },
+        "rules": [
+            // 1. 优先匹配国内网站和IP，直接连接
+            {
+                "geoip": ["cn"],
+                "outbound": "direct-out",
+                "type": "field"
+            },
+            {
+                "geosite": ["cn"],
+                "outbound": "direct-out",
+                "type": "field"
+            },
+            
+            // 2. 国外视频网站走Hysteria2协议
+            {
+                "domain": [
+                    "youtube.com", "youtu.be", "netflix.com", "hbo.com", "disneyplus.com",
+                    "primevideo.com", "hulu.com", "paramountplus.com", "peacocktv.com",
+                    "apple.com", "crunchyroll.com", "funimation.com", "twitch.tv", "vimeo.com"
+                ],
+                "outbound": "hysteria2-out",
+                "type": "field"
+            },
+            
+            // 3. DNS协议直连（避免DNS污染影响）
+            {
+                "protocol": ["dns"],
+                "outbound": "direct-out",
+                "type": "field"
+            },
+            
+            // 4. 剩余所有国外流量（非视频网站）走VLESS+Reality协议
+            {
+                "outbound": "vless-out",
+                "type": "field"
+            }
+        ]
+    },
+    "experimental": {
+        "auto_redir": {
+            "enabled": true
+        },
+        "probe": {
+            "enabled": true,
+            "url": "https://www.google.com/generate_204",
+            "interval": "30s",
+            "outbounds": ["vless-out", "hysteria2-out"],
+            "auto_switch": true
+        }
+    }
+}
+EOF
+    )
+    
+    # 保存客户端配置
+    echo "$VLESS_CONFIG" > /etc/sing-box/client-vless.json
+    echo "$HYSTERIA_CONFIG" > /etc/sing-box/client-hysteria.json
+    echo "$COMBINED_CONFIG" > /etc/sing-box/client-combined.json
+    
+    # 生成二维码（修复URI格式问题）
+    VLESS_URI="sing-box://$(echo -n "$VLESS_CONFIG" | base64 -w0 | tr '+/' '-_' | tr -d '=')"
+    HYSTERIA_URI="sing-box://$(echo -n "$HYSTERIA_CONFIG" | base64 -w0 | tr '+/' '-_' | tr -d '=')"
+    COMBINED_URI="sing-box://$(echo -n "$COMBINED_CONFIG" | base64 -w0 | tr '+/' '-_' | tr -d '=')"
+    
+    qrencode -o /etc/sing-box/vless-qr.png "$VLESS_URI"
+    qrencode -o /etc/sing-box/hysteria-qr.png "$HYSTERIA_URI"
+    qrencode -o /etc/sing-box/combined-qr.png "$COMBINED_URI"
+    
+    # 显示配置信息
+    echo "======================================"
+    echo "部署完成！"
+    echo "服务器IP: ${SERVER_IP}"
+    echo "VLESS端口: ${VLESS_PORT}"
+    echo "Hysteria2端口: ${HYSTERIA_PORT}"
+    echo "Server Name: ${SERVER_NAME}"
+    echo "UUID: ${UUID}"
+    echo "Reality公钥: ${REALITY_PUBLIC_KEY}"
+    echo "Reality短ID: ${REALITY_SHORT_ID}"
+    echo "Hysteria密码: ${HYSTERIA_PASSWORD}"
+    echo "======================================"
+    echo "VLESS+Reality 配置URI:"
+    echo "$VLESS_URI"
+    echo "--------------------------------------"
+    echo "Hysteria2 配置URI:"
+    echo "$HYSTERIA_URI"
+    echo "--------------------------------------"
+    echo "合并配置（自动切换）URI:"
+    echo "$COMBINED_URI"
+    echo "======================================"
+    echo "二维码已保存至 /etc/sing-box 目录"
+}
+
+# 设置服务
+setup_service() {
+    echo "设置系统服务..."
+    cat > /etc/systemd/system/sing-box.service << EOF
 [Unit]
 Description=sing-box service
 Documentation=https://sing-box.sagernet.org/
-After=network.target
+After=network.target nss-lookup.target
 
 [Service]
 User=root
-Group=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
-ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=infinity
-CPUQuota=70%
-MemoryLimit=256M
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# 配置防火墙
-echo "正在配置防火墙..."
-ufw allow 22/tcp  # 允许SSH
-ufw allow 443/tcp  # VLESS+Reality
-ufw allow 4443/udp  # Hysteria2
-ufw --force enable
-
-# 启动服务
-echo "正在启动sing-box服务..."
-systemctl daemon-reload
-systemctl enable --now sing-box
-systemctl status sing-box --no-pager
-
-# 生成客户端配置文件和二维码
-cat > /etc/sing-box/client.json << EOF
-{
-  "log": {
-    "level": "info",
-    "timestamp": true
-  },
-  "inbounds": [
-    {
-      "type": "socks",
-      "tag": "socks-in",
-      "listen": "127.0.0.1",
-      "listen_port": 10808
-    },
-    {
-      "type": "http",
-      "tag": "http-in",
-      "listen": "127.0.0.1",
-      "listen_port": 10809
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
-    },
-    {
-      "type": "block",
-      "tag": "block"
-    },
-    {
-      "type": "selector",
-      "tag": "selector",
-      "outbounds": [
-        "vless-out",
-        "hysteria2-out"
-      ],
-      "default": "vless-out",
-      "interrupt_exist_connections": true,
-      "health_check": {
-        "enable": true,
-        "url": "https://www.gstatic.com/generate_204",
-        "interval": "30s",
-        "timeout": "10s"
-      }
-    },
-    {
-      "type": "vless",
-      "tag": "vless-out",
-      "server": "${SERVER_IP}",
-      "server_port": 443,
-      "uuid": "${UUID}",
-      "flow": "xtls-rprx-vision",
-      "tls": {
-        "enabled": true,
-        "server_name": "${PRIMARY_SERVER_NAME}",
-        "reality": {
-          "enabled": true,
-          "public_key": "${REALITY_PUBLIC_KEY}",
-          "short_id": ""
-        },
-        "insecure": false,
-        "fingerprint": "chrome"
-      }
-    },
-    {
-      "type": "hysteria2",
-      "tag": "hysteria2-out",
-      "server": "${SERVER_IP}",
-      "server_port": 4443,
-      "password": "${HYSTERIA2_PASSWORD}",
-      "tls": {
-        "enabled": true,
-        "server_name": "${SECONDARY_SERVER_NAME}",
-        "insecure": true
-      }
-    }
-  ],
-  "route": {
-    "rules": [
-      {
-        "domain": [
-          "youtube.com",
-          "netflix.com",
-          "disneyplus.com",
-          "hbo.com",
-          "primevideo.com",
-          "vimeo.com",
-          "dailymotion.com"
-        ],
-        "outbound": "hysteria2-out",
-        "enabled": true
-      },
-      {
-        "geoip": {
-          "country": "CN"
-        },
-        "outbound": "direct",
-        "enabled": true
-      }
-    ],
-    "final": "selector"
-  }
+    systemctl daemon-reload
+    systemctl enable --now sing-box
+    systemctl start sing-box
 }
-EOF
 
-# 生成符合规范的sing-box远程配置URI
-CLIENT_CONFIG_CONTENT=$(cat /etc/sing-box/client.json | jq -c .)
-ENCODED_CONFIG=$(echo -n "$CLIENT_CONFIG_CONTENT" | base64 -w 0)
-REMOTE_PROFILE_URI="sing-box://${ENCODED_CONFIG}"
+# 主函数
+main() {
+    echo "开始部署sing-box双协议代理..."
+    check_system
+    install_dependencies
+    install_singbox
+    generate_config
+    setup_service
+    echo "部署完成！sing-box服务已启动"
+}
 
-# 显示配置信息和二维码
-echo "=============================================="
-echo "部署完成！以下是您的代理配置信息："
-echo ""
-echo "服务器IP: ${SERVER_IP}"
-echo ""
-echo "VLESS+Reality 配置："
-echo "  协议：vless"
-echo "  地址：${SERVER_IP}"
-echo "  端口：443"
-echo "  UUID：${UUID}"
-echo "  流控：xtls-rprx-vision"
-echo "  加密：none"
-echo "  Reality配置："
-echo "    服务器名称：${PRIMARY_SERVER_NAME}"
-echo "    公钥：${REALITY_PUBLIC_KEY}"
-echo "    短ID：(空)"
-echo "    指纹：chrome"
-echo ""
-echo "Hysteria2 配置："
-echo "  协议：hysteria2"
-echo "  地址：${SERVER_IP}"
-echo "  端口：4443"
-echo "  密码：${HYSTERIA2_PASSWORD}"
-echo "  服务器名称：${SECONDARY_SERVER_NAME}"
-echo "  ALPN：h3"
-echo "  允许不安全：true"
-echo ""
-echo "客户端配置二维码："
-echo "${REMOTE_PROFILE_URI}" | qrencode -t ANSIUTF8
-echo ""
-echo "配置文件已保存至 /etc/sing-box/client.json"
-echo "=============================================="
-    
+# 执行主函数
+main
