@@ -43,14 +43,11 @@ generate_config() {
     echo "生成配置文件..."
     
     # 获取服务器IP
-    SERVER_IP=$(curl -s https://api.ipify.org)
+    SERVER_IP=$(curl -s https://api.ipify.org || curl -s4 https://icanhazip.com)
     
-    # 随机端口（10000-65535）
-    VLESS_PORT=$((RANDOM % 55535 + 10000))
-    HYSTERIA_PORT=$((RANDOM % 55535 + 10000))
-    while [ $HYSTERIA_PORT -eq $VLESS_PORT ]; do
-        HYSTERIA_PORT=$((RANDOM % 55535 + 10000))
-    done
+    # 端口
+    VLESS_PORT=443
+    HYSTERIA_PORT=443
     
     # 随机选择一个未被屏蔽的server name
     SERVER_NAMES=("www.cloudflare.com" "www.bing.com" "www.microsoft.com" "www.office.com" "www.skype.com")
