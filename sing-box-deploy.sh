@@ -18,7 +18,7 @@ check_system() {
 install_dependencies() {
     echo "安装必要依赖..."
     apt update -qq
-    apt install -y -qq curl wget unzip qrencode jq > /dev/null
+    apt install -y -qq curl wget unzip ufw qrencode jq > /dev/null
 }
 
 # 下载最新版sing-box
